@@ -1,0 +1,64 @@
+name: Obsidian to Notion
+on:
+  push:
+    paths:
+      - "obs/sora2/**.md"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: pip install notion-client
+      - name: Sync notes (inline)
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB: ${{ secrets.NOTION_DB }}
+          TITLE_PROP: ${{ vars.TITLE_PROP || '名称' }}
+          UPDATED_PROP: ${{ vars.UPDATED_PROP || '最近更新' }}
+        run: |
+          python - <<'PY'
+          import os, glob, datetime
+          from notion_client import Client
+          token = os.environ["NOTION_TOKEN"]
+          db_id = os.environ["NOTION_DB"]
+          title_prop = os.environ.get("TITLE_PROP", "名称")
+          updated_prop = os.environ.get("UPDATED_PROP", "最近更新")
+          notion = Client(auth=token)
+
+          def find_page(title):
+              res = notion.databases.query(
+                  database_id=db_id,
+                  filter={"property": title_prop, "title": {"equals": title}},
+                  page_size=1,
+              )
+              rs = res.get("results", [])
+              return rs[0] if rs else None
+
+          def upsert(path):
+              title = os.path.splitext(os.path.basename(path))[0]
+              with open(path, "r", encoding="utf-8") as f:
+                  md = f.read()
+              props = {title_prop: [{"type": "text", "text": {"content": title}}]}
+              if updated_prop:
+                  props[updated_prop] = {"date": {"start": datetime.datetime.utcnow().isoformat()}}
+              para = {"object": "block", "type": "paragraph",
+                      "paragraph": {"rich_text": [{"type": "text", "text": {"content": md[:1900]}}]}}
+              page = find_page(title)
+              if page:
+                  notion.blocks.children.append(page["id"], children=[para])  # type: ignore
+                  notion.pages.update(page_id=page["id"], properties=props)  # type: ignore
+                  print("Updated:", title)
+              else:
+                  notion.pages.create(parent={"database_id": db_id},
+                                      properties=props, children=[para])
+                  print("Created:", title)
+
+          files = glob.glob("obs/sora2/**/*.md", recursive=True)
+          if not files: print("No markdown files found under obs/sora2/")
+          for p in files: upsert(p)
+          PY
